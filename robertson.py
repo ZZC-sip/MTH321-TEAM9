@@ -108,6 +108,34 @@ def explicit_euler(f, y0, t_grid):
     return out
 
 
+def rk4(f, y0, t_grid):
+    """Classical explicit fourth-order Runge--Kutta method.
+
+    For each step, four right-hand-side evaluations are combined as
+
+        y[n+1] = y[n] + h (k1 + 2*k2 + 2*k3 + k4) / 6.
+
+    The implementation accepts the same nonuniform time grid as the other
+    fixed-step solvers, which keeps it directly usable by the convergence
+    experiments and by any later comparison on a custom grid.
+    """
+    y = np.array(y0, dtype=float)
+    out = np.empty((len(t_grid), len(y)))
+    out[0] = y
+    for n in range(len(t_grid) - 1):
+        t_n = t_grid[n]
+        h = t_grid[n + 1] - t_n
+
+        k1 = f(t_n, y)
+        k2 = f(t_n + 0.5 * h, y + 0.5 * h * k1)
+        k3 = f(t_n + 0.5 * h, y + 0.5 * h * k2)
+        k4 = f(t_n + h, y + h * k3)
+
+        y = y + (h / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        out[n + 1] = y
+    return out
+
+
 def heun(f, y0, t_grid):
     """Explicit RK2 (Heun) — order 2."""
     y = np.array(y0, dtype=float)
@@ -134,7 +162,11 @@ def _newton_solve(F, J, w0, tol=1e-12, maxit=50):
     for it in range(maxit):
         if res < tol:
             return w, it, True
-        delta = np.linalg.solve(J(w), -F(w))
+        try:
+            delta = np.linalg.solve(J(w), -F(w))
+        except np.linalg.LinAlgError:
+            # A singular Jacobian means Newton cannot form a reliable update.
+            return w, it, False
         alpha = 1.0
         for _ in range(30):
             w_try = w + alpha * delta
@@ -168,7 +200,13 @@ def backward_euler(f, jf, y0, t_grid, newton_tol=1e-12):
             return np.eye(len(y)) - h * jf(t_next, w)
 
         w0 = y + h * f(t_grid[n], y)          # explicit-Euler predictor
-        y, k, _ = _newton_solve(F, J, w0, tol=newton_tol)
+        y_next, k, converged = _newton_solve(F, J, w0, tol=newton_tol)
+        if not converged:
+            raise RuntimeError(
+                f"Backward Euler Newton iteration did not converge at "
+                f"step {n} (t={t_grid[n + 1]:.16g}, iterations={k})."
+            )
+        y = y_next
         iters[n] = k
         out[n + 1] = y
     return out, iters
@@ -194,7 +232,13 @@ def trapezoidal(f, jf, y0, t_grid, newton_tol=1e-12):
             return np.eye(len(y)) - 0.5 * h * jf(t_next, w)
 
         w0 = y + h * f_n
-        y, _, _ = _newton_solve(F, J, w0, tol=newton_tol)
+        y_next, k, converged = _newton_solve(F, J, w0, tol=newton_tol)
+        if not converged:
+            raise RuntimeError(
+                f"Trapezoidal Newton iteration did not converge at "
+                f"step {n} (t={t_next:.16g}, iterations={k})."
+            )
+        y = y_next
         out[n + 1] = y
     return out
 
@@ -215,7 +259,7 @@ def trapezoidal(f, jf, y0, t_grid, newton_tol=1e-12):
 # --------------------------------------------------------------------------
 def adaptive_implicit_euler(f, jf, y0, t0, t1, h0, tol,
                             newton_tol=1e-12, max_steps=200000,
-                            method="backward_euler"):
+                            method="backward_euler", min_step=None):
     """
     Step-doubling adaptive implicit solver.
 
@@ -226,7 +270,29 @@ def adaptive_implicit_euler(f, jf, y0, t0, t1, h0, tol,
     Returns (t, y, h_used, n_rejected) where t is the accepted grid, y the
     solution on it, and h_used the step actually taken at each accepted step
     (len(h_used) + 1 == len(t)).
+
+    Invalid intervals, nonpositive tolerances/steps, unsupported method names,
+    Newton failure below min_step, failure to meet the error tolerance below
+    min_step, or exhausting max_steps before t1 raise an informative error.
+    If min_step is omitted, a small floating-point-aware default is used.
     """
+    if method not in ("backward_euler", "trapezoidal"):
+        raise ValueError("method must be 'backward_euler' or 'trapezoidal'")
+    if t1 <= t0:
+        raise ValueError("t1 must be greater than t0")
+    if h0 <= 0.0:
+        raise ValueError("h0 must be positive")
+    if tol <= 0.0 or newton_tol <= 0.0:
+        raise ValueError("tol and newton_tol must be positive")
+    if max_steps <= 0:
+        raise ValueError("max_steps must be positive")
+
+    if min_step is None:
+        min_step = max(np.finfo(float).eps * max(1.0, abs(t0), abs(t1)),
+                       h0 * 1e-12)
+    if min_step <= 0.0:
+        raise ValueError("min_step must be positive")
+
     step_fn = _be_step if method == "backward_euler" else _tr_step
 
     t = [t0]
@@ -245,6 +311,11 @@ def adaptive_implicit_euler(f, jf, y0, t0, t1, h0, tol,
         y_fine, _, ok3 = step_fn(f, jf, t[-1] + 0.5 * h, y_half, 0.5 * h, newton_tol)
 
         if not (ok1 and ok2 and ok3):
+            if h <= min_step or 0.5 * h < min_step:
+                raise RuntimeError(
+                    f"Newton iteration failed near t={t[-1]:.16g}; "
+                    f"cannot reduce step below min_step={min_step:.3e}."
+                )
             h *= 0.5
             n_rejected += 1
             continue
@@ -257,8 +328,19 @@ def adaptive_implicit_euler(f, jf, y0, t0, t1, h0, tol,
             if e < tol / 10.0:            # comfortably inside budget: grow
                 h = min(h0, 2.0 * h)
         else:
+            if h <= min_step or 0.5 * h < min_step:
+                raise RuntimeError(
+                    f"Error tolerance could not be met near t={t[-1]:.16g}; "
+                    f"cannot reduce step below min_step={min_step:.3e}."
+                )
             h *= 0.5                      # over budget: shrink and retry
             n_rejected += 1
+
+    if t[-1] < t1:
+        raise RuntimeError(
+            f"Adaptive solver reached max_steps={max_steps} at "
+            f"t={t[-1]:.16g}, before the requested final time t1={t1:.16g}."
+        )
 
     return np.array(t), np.array(y), np.array(h_used), n_rejected
 
@@ -331,6 +413,10 @@ def reference_solution(rtol=1e-12, atol=1e-14, method="Radau"):
     t_grid = output_grid()
     sol = solve_ivp(rhs, (T0, T1), Y0, method=method, rtol=rtol, atol=atol,
                     t_eval=t_grid, dense_output=False)
+    if not sol.success:
+        raise RuntimeError(
+            f"Reference solve with {method} failed: {sol.message}"
+        )
     return t_grid, sol.y.T
 
 
