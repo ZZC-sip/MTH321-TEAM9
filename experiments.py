@@ -302,10 +302,32 @@ def run_convergence(t, Yref):
 
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     for name, (errs, _) in res.items():
-        ax.loglog(hs, errs, "o-", label=name)
+        if name == "explicit_euler":
+            # The two Euler errors almost coincide here. Keep their true
+            # coordinates, but draw different styles so both remain visible.
+            ax.loglog(hs, errs, "o-", color="tab:blue", lw=3,
+                      ms=9, mfc="white", mew=2, label=name, zorder=4)
+        elif name == "backward_euler":
+            ax.loglog(hs, errs, "x--", color="tab:red", lw=1.6,
+                      ms=6, mew=1.6, label=name, zorder=5)
+        else:
+            colors = {"rk4": "tab:orange", "heun": "tab:green",
+                      "trapezoidal": "tab:purple"}
+            ax.loglog(hs, errs, "o-", color=colors[name], label=name)
     ref = np.array(hs)
-    ax.loglog(ref, 1e-4 * ref, "k--", lw=1, label="$O(h)$")
-    ax.loglog(ref, 1e-2 * ref ** 2, "k:", lw=1, label="$O(h^2)$")
+    # Anchor each guide line to a representative method error at the same h.
+    # This keeps the order comparison readable without changing any data.
+    h_anchor = ref[len(ref) // 2]
+    anchor_idx = len(ref) // 2
+    err_be = res["backward_euler"][0][anchor_idx]
+    err_heun = res["heun"][0][anchor_idx]
+    err_rk4 = res["rk4"][0][anchor_idx]
+    ax.loglog(ref, 1.5 * err_be * (ref / h_anchor), "k--", lw=1,
+              label="$O(h)$")
+    ax.loglog(ref, 1.8 * err_heun * (ref / h_anchor) ** 2, "k:", lw=1,
+              label="$O(h^2)$")
+    ax.loglog(ref, 1.8 * err_rk4 * (ref / h_anchor) ** 4, color="0.35",
+              ls="-.", lw=1, label="$O(h^4)$")
     ax.set_xlabel("$h$")
     ax.set_ylabel("relative error at $t=10^{-2}$")
     ax.set_title("Figure 5: convergence")
