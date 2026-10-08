@@ -18,19 +18,20 @@ python setup.py
 
 This checks whether Python, NumPy, SciPy, and Matplotlib are available and prints their version numbers. If a required package is missing, the script reports which package needs to be installed.
 
-### Run the experiments
+### Reproduce all figures and results
 
-Run:
+From the repository folder, install the required packages and run:
 
 ```bash
-python experiments.py
+python -m pip install -r requirements.txt
+python run_all.py
 ```
 
-This script runs the main experiments. It calculates reference solutions with Radau and BDF, studies the Jacobian eigenvalues and stiffness ratio, tests explicit Euler with different step sizes, and checks conservation, negative concentrations, and full-state error.
+`run_all.py` calls `experiments.py` and runs the full experiment suite. It calculates reference solutions with Radau and BDF, studies the Jacobian eigenvalues and stiffness ratio, tests explicit Euler with different step sizes, and checks conservation, negative concentrations, and full-state error.
 
 It also measures convergence orders for Euler, Heun, RK4, backward Euler, and the trapezoidal method; tests adaptive step-size control; compares the final value of `y2` at `t = 40`; studies L-stability; and records Newton iteration residuals.
 
-The script saves numerical tables as CSV files and figures as PNG files.
+It also records the accepted step sizes and local-error indicators for the adaptive methods. The results are saved as CSV files in `results/`, and the figures are saved as PNG files in `figures/`. In particular, `fig7_adaptive.png` shows the changing step size, while `fig7_adaptive_local_error.png` compares the accepted-step error indicators with their tolerances. Local tolerance is not a bound on the final error at `t = 40`.
 
 ### Plot the stability regions
 
@@ -45,11 +46,10 @@ This script plots the absolute-stability regions of explicit Euler, Heun, RK4, b
 ## Project files
 
 - `robertson.py`: Defines the Robertson ODE model, its analytic Jacobians, and the numerical methods: explicit Euler, Heun, RK4, backward Euler, and the trapezoidal method. It also contains the damped Newton solver, adaptive step-size controller, reference-solution function, output grids, and error and conservation diagnostics.
+- `run_all.py`: Runs the full experiment suite to reproduce the figures and CSV tables.
 - `experiments.py`: Runs the numerical experiments using functions from `robertson.py`. It generates figures and CSV tables for analysing the methods.
 - `stability_regions.py`: Calculates and plots the methods’ absolute-stability regions and estimates explicit-method step-size limits using the Robertson eigenvalues.
 - `setup.py`: Checks whether the required Python packages are installed and prints their version numbers.
 - `requirements.txt`: Lists the Python packages needed to run the project.
 - `figures/`: Stores generated plots.
 - `results/`: Stores numerical results in CSV format.
-
-Note: Check the output paths in `experiments.py`. In the current version, the script saves figures and results to folders one level above the project directory (`../figures` and `../results`). Change these paths if you want the output saved inside this repository’s `figures/` and `results/` folders.
