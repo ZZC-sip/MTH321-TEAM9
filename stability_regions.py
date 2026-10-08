@@ -15,10 +15,11 @@ take the Robertson Jacobian and step sizes.
 
 Run with:
     python stability_regions.py
-Outputs:  stability_regions_robertson.png
+Outputs:  figures/fig4_stability_regions.png
 """
 
 import numpy as np
+from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -61,8 +62,8 @@ METHODS = [
 
 def draw_region(R_func, ax, label, xlim=(-6, 2), ylim=(-4, 4), nx=600, ny=600):
     """Fill the region |R(z)| <= 1 (the absolute-stability region)."""
-    x = np.linspace(*xlim, nx)
-    y = np.linspace(*ylim, ny)
+    x = np.linspace(xlim[0], xlim[1], num=nx)
+    y = np.linspace(ylim[0], ylim[1], num=ny)
     X, Y = np.meshgrid(x, y)
     Z = X + 1j * Y
     with np.errstate(all="ignore"):
@@ -90,7 +91,7 @@ def stability_region_plot(h_values=(5e-4, 5.9e-4, 0.25), save=True):
     """
     t, Yref = reference_solution()
 
-    # eigenvalues at t = 40 (the most restrictive sampled state)
+    # Frozen-Jacobian diagnostic at t = 40, not a nonlinear stability proof.
     lam_end = nonzero_eigenvalues(Yref[-1])
     lam_max = float(np.max(np.abs(lam_end.real)))
 
@@ -119,6 +120,12 @@ def stability_region_plot(h_values=(5e-4, 5.9e-4, 0.25), save=True):
 
     for ax in axes[len(METHODS):]:
         ax.axis("off")
+        ax.text(0.03, 0.9,
+                "Overlaid step sizes:\n"
+                + "\n".join(f"h = {h:g}" for h in h_values)
+                + f"\n\nFor h={max(h_values):g}, the fast point lies\n"
+                  f"outside this view (Re(z) about {-max(h_values) * lam_max:.0f}).",
+                transform=ax.transAxes, va="top", fontsize=8, wrap=True)
 
     # one shared legend on the first empty slot
     axes[0].scatter([], [], s=45, marker="x", c="crimson", linewidths=1.6,
@@ -126,12 +133,14 @@ def stability_region_plot(h_values=(5e-4, 5.9e-4, 0.25), save=True):
     axes[0].legend(fontsize=8, loc="lower left")
 
     fig.suptitle(
-        r"Absolute-stability regions with $h\lambda_j$ overlay "
-        r"($\lambda_{\max}=3.393\times10^3$)"
+        "Absolute-stability regions with $h\\lambda_j$ overlay "
+        + f"($|\\lambda_{{\\mathrm{{fast}}}}(40)|={lam_max / 1e3:.3f}\\times10^3$)"
     )
     fig.tight_layout()
     if save:
-        fig.savefig("../figures/fig4_stability_regions.png", dpi=150,
+        output_dir = Path(__file__).resolve().parent / "figures"
+        output_dir.mkdir(exist_ok=True)
+        fig.savefig(output_dir / "fig4_stability_regions.png", dpi=150,
                     bbox_inches="tight")
     plt.close(fig)
 
