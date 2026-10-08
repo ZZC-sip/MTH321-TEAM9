@@ -14,6 +14,7 @@ Requires NumPy, SciPy and matplotlib.
 from __future__ import annotations
 
 import os
+import csv
 import time
 import warnings
 import numpy as np
@@ -35,18 +36,18 @@ from robertson import (  # noqa: E402
 )
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-FIG = os.path.join(HERE, "..", "figures")
-RES = os.path.join(HERE, "..", "results")
+FIG = os.path.join(HERE, "figures")
+RES = os.path.join(HERE, "results")
 os.makedirs(FIG, exist_ok=True)
 os.makedirs(RES, exist_ok=True)
 
 
 def save_csv(name, header, rows):
     path = os.path.join(RES, name)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(",".join(header) + "\n")
-        for r in rows:
-            f.write(",".join(str(x) for x in r) + "\n")
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
     print(f"  wrote {path}")
 
 
@@ -74,6 +75,8 @@ def run_reference():
              ["rtol", "y1_radau", "y2_radau", "y3_radau",
               "y1_bdf", "y2_bdf", "y3_bdf"], table)
 
+    if Yradau is None:
+        raise RuntimeError("No Radau reference solution was computed")
     print("    conservation defect =", conservation_defect(Yradau))
     print("    min component =", Yradau.min())
 
@@ -97,6 +100,7 @@ def run_reference():
 # ==========================================================================
 def run_eigenvalues(t, Yref):
     print("[1] eigenvalues and stiffness ratio")
+    from scipy.integrate import solve_ivp
     rows = []
     t_plot = []
     fast_plot = []
@@ -111,9 +115,13 @@ def run_eigenvalues(t, Yref):
             fast_plot.append(fast)
             slow_plot.append(slow)
             S_plot.append(S)
-    for tm in (1e-8, 1e-4, 1e-2, 1.0, 40.0):
-        idx = int(np.argmin(np.abs(t - tm)))
-        S, fast, slow = stiffness_ratio(Yref[idx])
+    sample_times = np.array((1e-8, 1e-4, 1e-2, 1.0, 40.0))
+    samples = solve_ivp(rhs, (T0, T1), Y0, method="Radau", rtol=1e-12,
+                        atol=1e-14, t_eval=sample_times)
+    if not samples.success:
+        raise RuntimeError(f"Eigenvalue sampling failed: {samples.message}")
+    for tm, y in zip(sample_times, samples.y.T):
+        S, fast, slow = stiffness_ratio(y)
         rows.append((tm, f"{fast:.3e}", f"{slow:.3e}",
                      f"{S:.3g}" if not np.isnan(S) else "nan"))
         print(f"    t={tm:g}  |lam_fast|={fast:.3e}  |lam_slow|={slow:.3e}  S={S:.3g}")
@@ -174,6 +182,7 @@ def run_explicit_stability(t, Yref):
     # Figure 3: explicit instability and step economy (two panels)
     hs_plot = [1e-2, 1e-3, 8e-4, 7e-4, 6e-4, 5.9e-4, 5e-4, 2e-4, 1e-4]
     stable_h, stable_err = [], []
+    negative_h = []
     unstable_h = []
     for h in hs_plot:
         g = uniform_grid(h)
@@ -181,6 +190,8 @@ def run_explicit_stability(t, Yref):
         if np.all(np.isfinite(Yn)):
             stable_h.append(h)
             stable_err.append(abs_error_at_t_end(Yn, _interp_ref(t, Yref, g)))
+            if np.min(Yn) < -1e-12:
+                negative_h.append(h)
         else:
             unstable_h.append(h)
 
@@ -191,7 +202,9 @@ def run_explicit_stability(t, Yref):
     axes[0].axvspan(h_star, 2e-2, color="crimson", alpha=0.18)
     axes[0].axvline(h_star, color="crimson", lw=1.4, ls="--")
     axes[0].plot(stable_h, [0.5] * len(stable_h), "o", color="seagreen", ms=7,
-                 label="stable")
+                 label="finite result")
+    axes[0].plot(negative_h, [0.5] * len(negative_h), "s", color="darkorange",
+                 ms=6, label="finite, negative component")
     axes[0].plot(unstable_h, [0.5] * len(unstable_h), "x", color="crimson", ms=8,
                  label="diverges")
     axes[0].set_xscale("log")
@@ -342,11 +355,10 @@ def run_convergence(t, Yref):
 # ==========================================================================
 def run_adaptive(t, Yref):
     """
-    Demonstrate that adaptivity actually cuts the work at matched error.
-
-    The brief is explicit: 'a fixed-h run relabelled adaptive is a fail', so
-    we report the real h(t) trajectory, accepted/rejected steps and the error
-    against the tight reference, and compare with fixed-step backward Euler.
+    Demonstrate varying steps and record cost and terminal error separately.
+    The local step-doubling tolerance is not a bound on global error at t=40.
+    These sweep runs have different terminal errors, so they are not a
+    matched-accuracy efficiency comparison.
     """
     print("[4b] adaptive step-size control (step doubling)")
 
@@ -362,6 +374,7 @@ def run_adaptive(t, Yref):
 
     # adaptive, tuned to land in the same error range
     rows = [("fixed BE", h_fixed, len(g_fixed) - 1, 0,
+             len(g_fixed) - 1,
              f"{err_fixed:.2e}", f"{dt_fixed:.2f}")]
     print(f"    fixed BE h={h_fixed:g}: steps={len(g_fixed)-1} "
           f"err_inf={err_fixed:.2e}  t={dt_fixed:.2f}s")
@@ -373,7 +386,8 @@ def run_adaptive(t, Yref):
             rhs, jacobian, Y0, T0, T1, h0=0.5, tol=tol)
         dt = time.time() - t0
         err_inf = float(np.max(np.abs(yA[-1] - Yref[-1])))
-        rows.append((f"adaptive BE tol={tol:g}", "-", int(len(hA)), int(n_rej),
+        rows.append((f"adaptive BE tol={tol:g}", tol, int(len(hA)), int(n_rej),
+                     3 * (len(hA) + n_rej),
                      f"{err_inf:.2e}", f"{dt:.2f}"))
         print(f"    adaptive BE tol={tol:g}: accepted={len(hA)} rejected={n_rej} "
               f"min_h={hA.min():.2e} err_inf={err_inf:.2e} t={dt:.2f}s")
@@ -387,20 +401,68 @@ def run_adaptive(t, Yref):
         rhs, jacobian, Y0, T0, T1, h0=0.5, tol=1e-8, method="trapezoidal")
     dtT = time.time() - t0
     errT = float(np.max(np.abs(yT[-1] - Yref[-1])))
-    rows.append(("adaptive TR tol=1e-8", "-", int(len(hT)), int(n_rejT),
+    rows.append(("adaptive TR tol=1e-8", 1e-8, int(len(hT)), int(n_rejT),
+                 3 * (len(hT) + n_rejT),
                  f"{errT:.2e}", f"{dtT:.2f}"))
     print(f"    adaptive TR tol=1e-8: accepted={len(hT)} rejected={n_rejT} "
           f"min_h={hT.min():.2e} err_inf={errT:.2e} t={dtT:.2f}s")
 
     save_csv("adaptive.csv",
-             ["method", "step_or_tol", "accepted", "rejected",
+             ["method", "step_or_local_tol", "accepted", "rejected",
+              "nonlinear_step_solves_including_rejections",
               "err_inf_at_40", "wall_time_s"], rows)
 
+    if best is None:
+        raise RuntimeError("No adaptive backward Euler trial was run")
     tol_b, err_b, tA, yA, hA, n_rej = best
+    local_rows = []
+    local_traces = []
+    for label, method, times, values, steps, tol_local in (
+            ("adaptive BE", "backward_euler", tA, yA, hA, tol_b),
+            ("adaptive TR", "trapezoidal", tT, yT, hT, 1e-8)):
+        indicators = []
+        for n, h in enumerate(steps):
+            segment = np.array([times[n], times[n + 1]])
+            if method == "backward_euler":
+                coarse = backward_euler(rhs, jacobian, values[n], segment)[0][-1]
+            else:
+                coarse = trapezoidal(rhs, jacobian, values[n], segment)[-1]
+            indicator = float(np.max(np.abs(values[n + 1] - coarse)))
+            indicators.append(indicator)
+            local_rows.append((label, times[n], times[n + 1], h,
+                               indicator, tol_local, indicator / tol_local))
+        local_traces.append((label, times[1:], np.asarray(indicators), tol_local))
+    save_csv("adaptive_local_errors.csv",
+             ["method", "t_start", "t_end", "accepted_h",
+              "step_doubling_difference", "local_tolerance", "ratio"],
+             local_rows)
+    print(f"    accepted-step local indicator / tolerance: "
+          f"max={max(row[-1] for row in local_rows):.3g}")
+
+    fig_local, local_axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    for label, t_end, indicators, tol_local in local_traces:
+        line, = local_axes[0].loglog(t_end, indicators, lw=1.5, label=label)
+        local_axes[0].axhline(tol_local, color=line.get_color(), ls="--",
+                              lw=1, label=f"{label} tolerance = {tol_local:g}")
+        local_axes[1].semilogx(t_end, indicators / tol_local,
+                               color=line.get_color(), lw=1.5, label=label)
+    local_axes[0].set_ylabel("step-doubling difference")
+    local_axes[0].set_title("Accepted-step local error indicators vs tolerances")
+    local_axes[0].legend(fontsize=8)
+    local_axes[1].axhline(1.0, color="black", ls="--", lw=1,
+                          label="acceptance limit")
+    local_axes[1].set_xlabel("time $t$")
+    local_axes[1].set_ylabel("indicator / tolerance")
+    local_axes[1].legend(fontsize=8)
+    for ax in local_axes:
+        ax.grid(alpha=0.3, which="both")
+    fig_local.tight_layout()
+    fig_save(fig_local, "fig7_adaptive_local_error.png")
+
     fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.0))
-    axes[0].semilogx(tA[:-1], hA, marker=".", ms=3, ls="-",
+    axes[0].semilogx(tA[1:], hA, marker=".", ms=3, ls="-",
                      label=f"adaptive BE, tol$={tol_b:g}$")
-    axes[0].semilogx(tT[:-1], hT, marker=".", ms=3, ls="-",
+    axes[0].semilogx(tT[1:], hT, marker=".", ms=3, ls="-",
                      label="adaptive TR, tol$=10^{-8}$")
     axes[0].axhline(h_fixed, color="k", ls=":", lw=1,
                     label=f"fixed $h={h_fixed:g}$")
@@ -416,7 +478,7 @@ def run_adaptive(t, Yref):
                    label=f"fixed BE ({len(g_fixed)-1} steps)")
     axes[1].set_xlabel("accepted steps")
     axes[1].set_ylabel("$|\\Delta y_\\infty|(40)$")
-    axes[1].set_title("work at matched accuracy", fontsize=10)
+    axes[1].set_title("work vs terminal error (accuracy differs)", fontsize=10)
     axes[1].legend(fontsize=8)
     axes[1].grid(alpha=0.3, which="both")
 
@@ -431,7 +493,7 @@ def run_y2_at_40(t, Yref):
     print("[5] y2(40) under refinement")
     y2_ref = Yref[-1, 1]
     print(f"    reference y2(40) = {y2_ref:.7e}")
-    rows = []
+    rows: list[tuple[str, float | str, int, str, str, str]] = []
     for h in (1.0, 0.5, 0.25, 0.125, 0.0625, 0.03125):
         g = uniform_grid(h)
         Yb, _ = backward_euler(rhs, jacobian, Y0, g)
@@ -450,18 +512,25 @@ def run_y2_at_40(t, Yref):
                   f"BE y2(40)={Yb[-1, 1]:.6e} "
                   f"TR failed: {exc}")
 
-        rows.append((h, len(g) - 1, f"{Yb[-1, 1]:.6e}",
-                     tr_y2, tr_min_y2))
+        rows.append(("backward Euler", h, len(g) - 1,
+                     f"{Yb[-1, 1]:.10e}", f"{Yb[:, 1].min():.3g}", "ok"))
+        rows.append(("trapezoidal", h, len(g) - 1, tr_y2, tr_min_y2,
+                     "ok" if tr_y2 != "Newton failed" else "Newton failed"))
     # adaptive high-order solvers
     from scipy.integrate import solve_ivp
     for rtol in (1e-4, 1e-6, 1e-8, 1e-10, 1e-12):
         s_r = solve_ivp(rhs, (0, 40), Y0, method="Radau", rtol=rtol, atol=1e-16)
         s_b = solve_ivp(rhs, (0, 40), Y0, method="BDF", rtol=rtol, atol=1e-16)
-        rows.append((f"rtol={rtol:g}", "-", f"{s_r.y[1,-1]:.6e}", f"{s_b.y[1,-1]:.6e}", "-"))
+        if not (s_r.success and s_b.success):
+            raise RuntimeError(f"Radau/BDF tolerance sweep failed at rtol={rtol:g}")
+        rows.append(("Radau", f"rtol={rtol:g}", len(s_r.t) - 1,
+                     f"{s_r.y[1,-1]:.10e}", f"{s_r.y[1].min():.3g}", "ok"))
+        rows.append(("BDF", f"rtol={rtol:g}", len(s_b.t) - 1,
+                     f"{s_b.y[1,-1]:.10e}", f"{s_b.y[1].min():.3g}", "ok"))
         print(f"    rtol={rtol:g}: Radau={s_r.y[1,-1]:.6e}  BDF={s_b.y[1,-1]:.6e}")
     save_csv("y2_at_40.csv",
-             ["h_or_rtol", "steps", "backward_euler_y2_40",
-              "trapezoidal_y2_40", "trapezoidal_min_y2"], rows)
+             ["method", "h_or_rtol", "nominal_grid_or_accepted_steps", "y2_at_40",
+              "min_y2", "status"], rows)
 
 
 def run_implicit_y2_tolerances(t, Yref):
@@ -536,10 +605,9 @@ def run_stability_regions():
     """
     Compare the absolute-stability regions with the actual h*lambda_j points.
 
-    This is the evidence for the brief's question: is accuracy or stability the
-    binding step-size constraint? For Robertson both eigenvalues are real and
-    negative, so the binding constraint is the leftmost intercept on the
-    negative real axis.
+    The h*lambda overlay is a local frozen-Jacobian diagnostic at t=40.
+    Compare its predicted edge with the step-size scan; the overlay alone
+    is not a proof of nonlinear stability.
     """
     print("[6b] absolute-stability regions with h*lambda overlay")
     try:
@@ -549,15 +617,16 @@ def run_stability_regions():
         return
     lam_max = stability_region_plot()
     h_edge = 2.0 / lam_max
-    print(f"    binding constraint for explicit Euler: h < {h_edge:.3e} "
-          f"(stability), while accuracy needs far smaller h")
+    print(f"    local explicit Euler stability edge at t=40: h < {h_edge:.3e}")
+    print("    the binding limit depends on the requested error target; "
+          "the h*lambda overlay is not a nonlinear stability proof")
 
 
 # ==========================================================================
 # 7. Step economy
 # ==========================================================================
 def run_economy(t, Yref):
-    print("[7] step economy")
+    print("[7] cost and accuracy")
     rows = []
     for h in (2e-4, 1e-4):
         g = uniform_grid(h)
@@ -570,11 +639,62 @@ def run_economy(t, Yref):
     from scipy.integrate import solve_ivp
     for rtol in (1e-6, 1e-8, 1e-10):
         s = solve_ivp(rhs, (0, 40), Y0, method="Radau", rtol=rtol, atol=1e-16)
-        err = abs(Yref[-1, 0] - s.y[0, -1])
-        rows.append(("Radau adaptive", f"rtol={rtol:g}", s.t.size, f"{err:.2e}", "-"))
-        print(f"    Radau rtol={rtol:g}: steps={s.t.size} err={err:.2e}")
+        if not s.success:
+            raise RuntimeError(f"Radau cost sweep failed: {s.message}")
+        err = float(np.max(np.abs(Yref[-1] - s.y[:, -1])))
+        rows.append(("Radau adaptive", f"rtol={rtol:g}", s.t.size - 1,
+                     f"{err:.2e}", "-"))
+        print(f"    Radau rtol={rtol:g}: steps={s.t.size - 1} err={err:.2e}")
     save_csv("economy.csv",
-             ["method", "step_or_tol", "steps", "abs_err_y1_at_40", "wall_time_s"], rows)
+             ["method", "step_or_tol", "steps", "full_state_error_inf_at_40",
+              "wall_time_s"], rows)
+    print("    economy.csv is an accuracy sweep; its rows have different errors")
+
+    # A separate matched-accuracy comparison, using the same full-state norm.
+    # Include the non-negativity check because a finite answer can be invalid.
+    matched = []
+    for method, h in (("explicit Euler", 6e-4), ("backward Euler", 1.0)):
+        grid = uniform_grid(h)
+        counts = {"rhs": 0, "jacobian": 0}
+
+        def counted_rhs(tm, y):
+            counts["rhs"] += 1
+            return rhs(tm, y)
+
+        def counted_jacobian(tm, y):
+            counts["jacobian"] += 1
+            return jacobian(tm, y)
+
+        started = time.perf_counter()
+        if method == "explicit Euler":
+            Y = explicit_euler(counted_rhs, Y0, grid)
+            newton_iterations = 0
+        else:
+            Y, iterations = backward_euler(counted_rhs, counted_jacobian,
+                                           Y0, grid)
+            newton_iterations = int(iterations.sum())
+        wall_time = time.perf_counter() - started
+        error = float(np.max(np.abs(Y[-1] - Yref[-1])))
+        minimum = float(Y.min())
+        matched.append((method, h, len(grid) - 1, error, minimum,
+                        conservation_defect(Y), counts["rhs"],
+                        counts["jacobian"], newton_iterations, wall_time))
+        print(f"    {method}, h={h:g}: full-state error={error:.3e}, "
+              f"steps={len(grid)-1}, min component={minimum:.3e}, "
+              f"RHS evaluations={counts['rhs']}")
+
+    errors = [row[3] for row in matched]
+    target = sum(errors) / len(errors)
+    if max(abs(e - target) / target for e in errors) > 0.05:
+        raise RuntimeError("Euler comparison did not reach matched accuracy")
+    save_csv("matched_euler_cost.csv",
+             ["method", "nominal_h", "steps", "full_state_error_inf_at_40",
+              "min_component", "conservation_defect", "rhs_evaluations",
+              "jacobian_evaluations", "newton_iterations", "solver_wall_time_s"],
+             matched)
+    print(f"    matched terminal full-state error is about {target:.3e}; "
+          "time excludes reference computation, grid setup and plotting")
+    print("    step count alone does not include the work inside implicit steps")
 
 
 # ==========================================================================
