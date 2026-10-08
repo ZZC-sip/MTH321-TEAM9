@@ -13,6 +13,8 @@ Course : MT3H21-2627-S1, Numerical PDEs / Numerical Analysis, Project 1
 
 from __future__ import annotations
 
+from typing import Literal
+
 import numpy as np
 from scipy.integrate import solve_ivp
 
@@ -63,8 +65,8 @@ def jacobian(t: float, y: np.ndarray) -> np.ndarray:
 def reduced_jacobian(y: np.ndarray) -> np.ndarray:
     """
     2x2 Jacobian obtained by eliminating y3 = 1 - y1 - y2.
-    Its two eigenvalues are exactly the two *nonzero* eigenvalues of the full
-    3x3 Jacobian, so the stiffness ratio is well defined from it.
+    Its eigenvalues describe the two modes on the conservation manifold.
+    At t = 0 they are -0.04 and 0, so the stiffness ratio is undefined.
     """
     y1, y2 = y[0], y[1]
     y3 = 1.0 - y1 - y2
@@ -76,15 +78,15 @@ def reduced_jacobian(y: np.ndarray) -> np.ndarray:
 
 
 def nonzero_eigenvalues(y: np.ndarray) -> np.ndarray:
-    """The two nonzero Jacobian eigenvalues (from the reduced Jacobian)."""
+    """The two conservation-manifold eigenvalues (one is zero at t = 0)."""
     return np.linalg.eigvals(reduced_jacobian(y))
 
 
 def stiffness_ratio(y: np.ndarray, zero_tol: float = 1e-12):
     """
-    S(t) = max|Re lam_j| / min|Re lam_j| over the two nonzero eigenvalues.
+    S(t) = max|Re lam_j| / min|Re lam_j| for the two modes when defined.
     Returns (S, lam_fast, lam_slow). S is nan when the pair is degenerate
-    (e.g. at t = 0, where both are zero).
+    (e.g. at t = 0, where the pair is -0.04 and 0).
     """
     lam = nonzero_eigenvalues(y)
     mag = np.abs(lam.real)
@@ -373,7 +375,8 @@ def _tr_step(f, jf, t_n, y_n, h, newton_tol):
 
 def newton_residual_trace(f, jf, t_n, y_n, h, newton_tol=1e-12, maxit=40):
     """
-    Print ||F||_inf per Newton iteration for one implicit-Euler step.
+    Print ||F||_inf for undamped Newton starting from the old state.
+    The production integrators instead use a predictor and damped Newton.
 
     Diagnostic for the lightning talk: on the very first Robertson step the
     residual RISES (the initial guess y2 = 0 is degenerate, the 3e7 y2^2 term
@@ -405,7 +408,9 @@ def output_grid():
     return np.concatenate(([T0], np.logspace(np.log10(TFIRST), np.log10(T1), N_OUT)))
 
 
-def reference_solution(rtol=1e-12, atol=1e-14, method="Radau"):
+def reference_solution(
+    rtol=1e-12, atol=1e-14, method: Literal["Radau", "BDF"] = "Radau"
+):
     """
     Tight-tolerance reference on the common output grid.
     Returns (t_grid, Y_ref) with Y_ref[i] = y(t_grid[i]).
@@ -413,7 +418,7 @@ def reference_solution(rtol=1e-12, atol=1e-14, method="Radau"):
     t_grid = output_grid()
     sol = solve_ivp(rhs, (T0, T1), Y0, method=method, rtol=rtol, atol=atol,
                     t_eval=t_grid, dense_output=False)
-    if not sol.success:
+    if not sol.success or sol.y is None:
         raise RuntimeError(
             f"Reference solve with {method} failed: {sol.message}"
         )
